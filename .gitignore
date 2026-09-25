@@ -1,3 +1,8 @@
+# Saidas de treino (modelos, logs, tensorboard) - cada um gera localmente
+models/
+logs/
+tensorboard_logs/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
