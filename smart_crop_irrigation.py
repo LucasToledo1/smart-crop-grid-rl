@@ -10,17 +10,37 @@ class SmartCropIrrigationEnv(gym.Env):
 
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 4}
 
-    def __init__(self, grid_size=5, max_steps=250, render_mode=None, dry_rate=0.08):
+    def __init__(
+        self,
+        grid_size=5,
+        max_steps=250,
+        render_mode=None,
+        dry_rate=0.08,
+        inventory_capacity=3,
+        border_penalty=0.0,
+        idle_penalty=0.0,
+    ):
         super().__init__()
 
         self.grid_size = grid_size
         self.max_steps = max_steps
         self.current_step = 0
+        # Quantas plantas o robo carrega antes de precisar voltar na base pra
+        # descarregar. Capacidade maior = menos viagens de ida e volta, mais
+        # tempo sobrando pra cuidar de plantas longe da base.
+        self.inventory_capacity = inventory_capacity
         # Chance por passo de cada planta secar 1 nível. Era 0.15 fixo no código
         # (testamos: matava uma planta esquecida em ~13 passos, rápido demais pro
         # agente conseguir colher o grid inteiro a tempo). Exposto como parâmetro
         # pra poder testar valores diferentes nos experimentos.
         self.dry_rate = dry_rate
+        # Reward shaping opcional (default 0.0 = desligado, comportamento igual a antes).
+        # Ideia veio do benchmark de A2C do grupo: sem isso o agente aprende a ficar
+        # parado num canto (recompensa esparsa demais pra valer a pena arriscar).
+        # border_penalty: bater na borda do grid sem se mover.
+        # idle_penalty: usar "Esperar" quando tem planta pra regar/colher ou inventario cheio.
+        self.border_penalty = border_penalty
+        self.idle_penalty = idle_penalty
 
         # Posição da base
         self.base_pos = np.array([0, 0])
@@ -42,11 +62,15 @@ class SmartCropIrrigationEnv(gym.Env):
         self.observation_space = spaces.Dict(
             {
                 "robot_pos": spaces.MultiDiscrete([self.grid_size, self.grid_size]),
-                "inventory": spaces.Discrete(4),  # 0 a 3 plantas
+                "inventory": spaces.Discrete(self.inventory_capacity + 1),
                 # Matriz de umidade: 0 (morta) a 4 (encharcada). Usando Box para facilitar a representação 2D.
                 "grid_moisture": spaces.Box(
                     low=0, high=4, shape=(self.grid_size, self.grid_size), dtype=np.int8
                 ),
+                # Atalhos que o agente já poderia inferir combinando robot_pos + grid_moisture,
+                # mas dar direto acelera o aprendizado (ideia testada pelo grupo com A2C/DQN).
+                "cell_moisture": spaces.Box(low=0, high=4, shape=(1,), dtype=np.int8),
+                "at_base": spaces.Discrete(2),
             }
         )
 
@@ -82,6 +106,7 @@ class SmartCropIrrigationEnv(gym.Env):
         reward = -0.1  # Penalidade padrão por passo (tempo)
         terminated = False
         truncated = False
+        previous_pos = self.robot_pos.copy()
 
         # 1. Processar a Ação do Agente
         if action == 0:  # Cima
@@ -106,7 +131,7 @@ class SmartCropIrrigationEnv(gym.Env):
 
         elif action == 5:  # Colher
             r, c = self.robot_pos
-            if self.inventory < 3:
+            if self.inventory < self.inventory_capacity:
                 if self.grid_moisture[r, c] == 2:
                     self.inventory += 1
                     self.grid_moisture[r, c] = (
@@ -127,7 +152,16 @@ class SmartCropIrrigationEnv(gym.Env):
                 reward -= 1  # Tentar descarregar fora da base ou vazio
 
         elif action == 7:  # Esperar
-            pass
+            # Penaliza esperar tendo trabalho pendente (planta pra regar/colher, ou
+            # inventario cheio esperando entrega) - sem isso o agente pode aprender
+            # a ficar parado, já que "nao fazer nada" nunca é punido diretamente.
+            tem_trabalho = bool(np.any((self.grid_moisture == 1) | (self.grid_moisture == 2))) or self.inventory > 0
+            if tem_trabalho:
+                reward -= self.idle_penalty
+
+        # Bateu na borda (ação de movimento que nao mudou a posição)
+        if action in (0, 1, 2, 3) and np.array_equal(previous_pos, self.robot_pos):
+            reward -= self.border_penalty
 
         # 2. Dinâmica do Ambiente (Secagem estocástica)
         deaths = self._apply_moisture_decay()
@@ -169,10 +203,13 @@ class SmartCropIrrigationEnv(gym.Env):
         return deaths
 
     def _get_obs(self):
+        r, c = self.robot_pos
         return {
             "robot_pos": self.robot_pos.copy(),
             "inventory": self.inventory,
             "grid_moisture": self.grid_moisture.copy(),
+            "cell_moisture": np.array([self.grid_moisture[r, c]], dtype=np.int8),
+            "at_base": int(np.array_equal(self.robot_pos, self.base_pos)),
         }
 
     def _get_info(self):
@@ -241,9 +278,11 @@ class SmartCropIrrigationEnv(gym.Env):
         )
         pygame.draw.circle(canvas, (20, 20, 20), robot_center, self.cell_size // 3)
 
-        # Inventário: até 3 quadrados, preenchido = planta carregada
+        # Inventário: um quadrado por vaga (limitado a 8 na tela, pra nao estourar
+        # a largura da janela se a capacidade for grande), preenchido = planta carregada
         slot_size = 16
-        for i in range(3):
+        n_slots_shown = min(self.inventory_capacity, 8)
+        for i in range(n_slots_shown):
             slot_rect = pygame.Rect(
                 8 + i * (slot_size + 4), self.window_size + 12, slot_size, slot_size
             )
@@ -252,7 +291,7 @@ class SmartCropIrrigationEnv(gym.Env):
             pygame.draw.rect(canvas, (0, 0, 0), slot_rect, width=1)
 
         # Passos: barra de progresso até o timeout
-        bar_x = 8 + 3 * (slot_size + 4) + 12
+        bar_x = 8 + n_slots_shown * (slot_size + 4) + 12
         bar_width = self.window_size - bar_x - 8
         progress = self.current_step / self.max_steps
         pygame.draw.rect(
