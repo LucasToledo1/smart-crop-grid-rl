@@ -12,12 +12,12 @@ import zipfile
 
 import numpy as np
 import torch
-from stable_baselines3 import DQN
+from stable_baselines3 import DQN, PPO, A2C
 import smart_crop_irrigation_V2 as crop
 from smart_crop_irrigation_V2 import SmartCropIrrigationEnv
 
 
-def load_model(path):
+def load_model(path, algo):
     with zipfile.ZipFile(path) as archive:
         bad = archive.testzip()
         if bad is not None:
@@ -31,7 +31,8 @@ def load_model(path):
         return original_load(file, *args, **kwargs)
 
     with patch.object(torch, 'load', new=load_via_memory):
-        return DQN.load(str(path), device='cpu')
+        algorithms = {"dqn": DQN, "ppo": PPO, "a2c": A2C}
+        return algorithms[algo].load(str(path), device='cpu')
 
 
 def episode_metrics(env, terminated, truncated, waterings, waits, borders):
@@ -58,29 +59,79 @@ def episode_metrics(env, terminated, truncated, waterings, waits, borders):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--model', required=True, help='Modelo .zip; config.json deve estar na mesma pasta.')
-    parser.add_argument('--algo', choices=['dqn'], default='dqn')
+    parser.add_argument('--model', required=True, help='Caminho do modelo .zip.')
+    parser.add_argument('--algo', choices=['dqn', 'ppo', 'a2c'], default='dqn')
     parser.add_argument('--episodes', type=int, default=5)
     parser.add_argument('--seed', type=int, default=1000)
     parser.add_argument('--no-render', action='store_true', help='Executa rapidamente, sem janela.')
+    parser.add_argument('--grid-size', type=int, default=5)
+    parser.add_argument('--max-steps', type=int, default=250)
+    parser.add_argument('--dry-rate', type=float, default=0.005)
+
     args = parser.parse_args()
+
     if args.episodes < 1:
         parser.error('episodes deve ser positivo')
     model_path = Path(args.model)
     config_path = model_path.parent / 'config.json'
-    if not config_path.is_file():
-        parser.error(f'Configuração não encontrada: {config_path}')
-    config = json.loads(config_path.read_text(encoding='utf-8'))
+
+    # if not config_path.is_file():
+    #     parser.error(f'Configuração não encontrada: {config_path}')
+    # config = json.loads(config_path.read_text(encoding='utf-8'))
+    # current_hash = hashlib.sha256(Path(crop.__file__).read_bytes()).hexdigest()
+    # if config.get('environment_sha256') != current_hash:
+    #     parser.error('O smart_crop_irrigation.py difere do arquivo usado no treino. Use a mesma versão do treinamento.')
+
+    if config_path.is_file():
+        config = json.loads(config_path.read_text(encoding='utf-8-sig'))
+    else:
+        config = {}
+
+    # Completa configurações ausentes com os argumentos do comando.
+    for key in ('grid_size', 'max_steps', 'dry_rate'):
+        value = getattr(args, key)
+
+        if value is not None:
+            if key in config and config[key] != value:
+                parser.error(f'{key} difere do config.json do treinamento.')
+            config[key] = value
+
+    missing = [
+        key for key in ('grid_size', 'max_steps', 'dry_rate')
+        if key not in config
+    ]
+    if missing:
+        flags = ', '.join('--' + key.replace('_', '-') for key in missing)
+        parser.error(f'Informe os valores usados no treino: {flags}')
+
+    if config['grid_size'] < 2 or config['max_steps'] < 1:
+        parser.error('grid-size deve ser >= 2 e max-steps deve ser >= 1.')
+    if not 0 <= config['dry_rate'] <= 1:
+        parser.error('dry-rate deve estar entre 0 e 1.')
+
     current_hash = hashlib.sha256(Path(crop.__file__).read_bytes()).hexdigest()
-    if config.get('environment_sha256') != current_hash:
-        parser.error('O smart_crop_irrigation.py difere do arquivo usado no treino. Use a mesma versão do treinamento.')
+    saved_hash = config.get('environment_sha256')
+
+    if saved_hash is not None:
+        if saved_hash != current_hash:
+            parser.error(
+                'O smart_crop_irrigation_V2.py difere do usado no treino.'
+            )
+    else:
+        print(
+            'Sem hash registrado: confira se o V2 e seus parâmetros '
+            'são os mesmos usados no treinamento.'
+        )
+
     env = SmartCropIrrigationEnv(
-        grid_size=config['grid_size'], max_steps=config['max_steps'],
-        dry_rate=config['dry_rate'], render_mode=None if args.no_render else 'human',
+        grid_size=config['grid_size'], 
+        max_steps=config['max_steps'],
+        dry_rate=config['dry_rate'], 
+        render_mode=None if args.no_render else 'human',
     )
     print(f"Ambiente: grid={config['grid_size']}, dry_rate={config['dry_rate']}, limite={config['max_steps']}")
     try:
-        model = load_model(model_path)
+        model = load_model(model_path, args.algo)
         if env.observation_space != model.observation_space or env.action_space != model.action_space:
             raise ValueError('Os espaços do modelo e do ambiente não correspondem. Use um modelo treinado com estes arquivos.')
         if not args.no_render:

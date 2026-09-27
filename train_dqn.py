@@ -22,7 +22,13 @@ from smart_crop_irrigation_V2 import SmartCropIrrigationEnv
 def parse_args():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--timesteps", type=int, default=200_000)
+    #Parâmetros usados para instanciar o Smart_Crop_Irrigation
+    parser.add_argument("--grid-size", type=int, default=5)
+    parser.add_argument("--max-steps", type=int, default=250)
+    parser.add_argument("--dry-rate", type=float, default=0.08)
+
+    #Hiperparâmetros e duração do treinamento
+    parser.add_argument("--timesteps", type=int, default=300_000)
     parser.add_argument("--learning-rate", type=float, default=1e-4)
     parser.add_argument("--buffer-size", type=int, default=50_000)
     parser.add_argument("--batch-size", type=int, default=64)
@@ -30,16 +36,17 @@ def parse_args():
     parser.add_argument("--learning-starts", type=int, default=1_000)
     parser.add_argument("--train-freq", type=int, default=4)
     parser.add_argument("--target-update-interval", type=int, default=10_000)
-    parser.add_argument("--eval-freq", type=int, default=10_000)
-    parser.add_argument("--run-name", type=str, default="dqn_baseline")
-
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--grid-size", type=int, default=5)
-    parser.add_argument("--max-steps", type=int, default=250)
-    parser.add_argument("--dry-rate", type=float, default=0.08)
     parser.add_argument("--exploration-fraction", type=float, default=0.3)
     parser.add_argument("--exploration-final-eps", type=float, default=0.1)
+
+    #Avaliação periódica durante o treinaemnto
+    parser.add_argument("--eval-freq", type=int, default=10_000)
     parser.add_argument("--eval-episodes", type=int, default=10)
+
+    #Identificação e reprodutibilidade da execução
+    parser.add_argument("--run-name", type=str, default="dqn_baseline")
+    parser.add_argument("--seed", type=int, default=42)
+
     args = parser.parse_args()
     if Path(args.run_name).name != args.run_name or args.run_name in ("", ".", ".."):
         parser.error("run-name deve ser apenas um nome de pasta")
